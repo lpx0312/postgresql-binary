@@ -1,0 +1,171 @@
+
+# PostgreSQL 编译基础镜像 —— glibc 2.17 基线(CentOS 7)
+# 构建示例:
+#   docker build -f base/Dockerfile-glib2.17 --build-arg TARGETARCH=amd64 -t pgsql-binary:base-glib-2.17 .
+#   # 国内构建用南大镜像加速:
+#   docker build -f base/Dockerfile-glib2.17 --build-arg TARGETARCH=amd64 --build-arg ZONE=cn -t pgsql-binary:base-glib-2.17 .
+#   # 内网走代理下载 patchelf:
+#   docker build -f base/Dockerfile-glib2.17 --build-arg TARGETARCH=amd64 --build-arg GH_PROXY=https://gh.1102345.xyz/ -t pgsql-binary:base-glib-2.17 .
+#
+# 可用 ARG:
+#   ZONE             区域:空(默认)=vault.centos.org 官方存档;cn=南大镜像(国内加速)
+#   GH_PROXY         GitHub 下载代理前缀,默认空(直连)。例:https://gh.1102345.xyz/
+#   PATCHELF_VERSION patchelf 版本,默认 0.19.1
+#   OPENSSL_VERSION  自编译 OpenSSL 1.1.1 版本(默认 1.1.1w)。CentOS 7 系统自带 1.0.2,
+#                    PostgreSQL 需要 OpenSSL >= 1.1.0,必须升级。
+#   TARGETARCH       目标架构(amd64/arm64),CI 显式传入
+FROM centos:7.9.2009
+
+ARG ZONE=""
+ARG GH_PROXY=""
+ARG PATCHELF_VERSION=0.19.1
+ARG OPENSSL_VERSION=1.1.1w
+ARG TARGETARCH
+
+# ============================================================
+# yum 源修复:CentOS 7 已 EOL,镜像内官方源全部失效,必须改用存档源
+# amd64/arm64 路径不同,按 TARGETARCH 分流(arm64 走 altarch/):
+#   amd64 -> <vault>/centos/7.9.2009/os/x86_64/
+#   arm64 -> <vault>/altarch/7.9.2009/os/aarch64/
+# gpgcheck 全部关闭(存档源 key 对不上,构建镜像场景可接受)。
+# ============================================================
+RUN set -e && \
+    if [ "$TARGETARCH" = "arm64" ]; then \
+        if [ "${ZONE}" = "cn" ]; then \
+            VAULT="https://mirror.nju.edu.cn/centos-vault/altarch"; \
+        else \
+            VAULT="https://vault.centos.org/altarch"; \
+        fi; \
+    else \
+        if [ "${ZONE}" = "cn" ]; then \
+            VAULT="https://mirror.nju.edu.cn/centos-vault/centos"; \
+        else \
+            VAULT="https://vault.centos.org/centos"; \
+        fi; \
+    fi && \
+    printf '[base]\nname=CentOS-7 - Base\nbaseurl=%s/$releasever/os/$basearch/\ngpgcheck=0\n\n[updates]\nname=CentOS-7 - Updates\nbaseurl=%s/$releasever/updates/$basearch/\ngpgcheck=0\n\n[extras]\nname=CentOS-7 - Extras\nbaseurl=%s/$releasever/extras/$basearch/\ngpgcheck=0\n' \
+        "$VAULT" "$VAULT" "$VAULT" > /etc/yum.repos.d/CentOS-Base.repo && \
+    echo "==> [$TARGETARCH][ZONE=${ZONE:-default}] CentOS-Base -> ${VAULT}"
+
+# 安装 SCL 仓库(devtoolset 在这里),并将 repo 指到存档源
+RUN set -e && \
+    yum install -y centos-release-scl && \
+    if [ "$TARGETARCH" = "arm64" ]; then \
+        if [ "${ZONE}" = "cn" ]; then \
+            VAULT="https://mirror.nju.edu.cn/centos-vault/altarch"; \
+        else \
+            VAULT="https://vault.centos.org/altarch"; \
+        fi; \
+    else \
+        if [ "${ZONE}" = "cn" ]; then \
+            VAULT="https://mirror.nju.edu.cn/centos-vault/centos"; \
+        else \
+            VAULT="https://vault.centos.org/centos"; \
+        fi; \
+    fi && \
+    printf '[centos-sclo-rh]\nname=CentOS-7 - SCLo rh\nbaseurl=%s/$releasever/sclo/$basearch/rh/\ngpgcheck=0\nenabled=1\n' \
+        "$VAULT" > /etc/yum.repos.d/CentOS-SCLo-scl-rh.repo && \
+    printf '[centos-sclo-sclo]\nname=CentOS-7 - SCLo sclo\nbaseurl=%s/$releasever/sclo/$basearch/sclo/\ngpgcheck=0\nenabled=1\n' \
+        "$VAULT" > /etc/yum.repos.d/CentOS-SCLo-scl.repo && \
+    echo "==> [$TARGETARCH] SCLo 源配置完成"
+
+# ============================================================
+# 安装编译依赖
+# Redis 7.x 要求 gcc >= 4.9(C11),CentOS 7 默认 gcc 4.8.5,需用 devtoolset:
+#   amd64 -> devtoolset-11(GCC 11.2.1)
+#   arm64 -> devtoolset-10(GCC 10.2.1;aarch64 的 SCL 无 devtoolset-11-gcc 本体)
+# ============================================================
+# perl/perl-core:OpenSSL 1.1.1 的 ./configure 需要 Perl 5(centos:7 基础镜像不带)
+# pkgconfig:Redis 7.x 的 Makefile 用 pkg-config 探测 OpenSSL 头文件/库路径,
+#            缺了它会静默拿到空参数,编译时报 openssl/ssl.h: No such file or directory
+RUN set -e && \
+    yum install -y ca-certificates curl tar make zlib-devel perl perl-core pkgconfig && \
+    if [ "$TARGETARCH" = "arm64" ]; then \
+        DTS=10; \
+    else \
+        DTS=11; \
+    fi && \
+    yum install -y \
+        devtoolset-${DTS}-gcc \
+        devtoolset-${DTS}-gcc-c++ \
+        devtoolset-${DTS}-binutils && \
+    yum clean all && \
+    rm -rf /var/cache/yum
+
+# 安装新版 patchelf。
+# yum/epel 源里的 patchelf 太老(0.x),设置 RPATH 可能静默失败,必须用新版。
+# 架构映射:docker 用 amd64/arm64,patchelf 包名用 x86_64/aarch64
+RUN set -e && \
+    case "$TARGETARCH" in \
+        amd64)  PE_ARCH=x86_64  ;; \
+        arm64)  PE_ARCH=aarch64 ;; \
+        *)      PE_ARCH="$TARGETARCH" ;; \
+    esac && \
+    PE_URL="${GH_PROXY}https://github.com/NixOS/patchelf/releases/download/${PATCHELF_VERSION}/patchelf-${PATCHELF_VERSION}-${PE_ARCH}.tar.gz" && \
+    echo "==> 下载 patchelf: $PE_URL" && \
+    curl -sSL -o /tmp/patchelf.tar.gz "$PE_URL" && \
+    tar -xzf /tmp/patchelf.tar.gz -C /tmp && \
+    cp /tmp/bin/patchelf /usr/local/bin/patchelf && \
+    chmod +x /usr/local/bin/patchelf && \
+    rm -rf /tmp/patchelf* && \
+    patchelf --version
+
+# 全局启用 devtoolset(amd64=11 / arm64=10)。
+# DTS 版本由实际安装的目录决定,然后建统一软链 /opt/rh/devtoolset -> devtoolset-{10,11},
+# 这样 ENV 和运行时 source 路径在两个架构上完全一致,无需按架构分支。
+RUN set -e && \
+    if   [ -d /opt/rh/devtoolset-11 ]; then DTS=11; \
+    elif [ -d /opt/rh/devtoolset-10 ]; then DTS=10; \
+    else echo "ERROR: 未找到 devtoolset 目录"; exit 1; fi && \
+    ln -sf "devtoolset-${DTS}" /opt/rh/devtoolset && \
+    echo "source /opt/rh/devtoolset/enable" > /etc/profile.d/devtoolset.sh && \
+    echo "==> 全局启用 devtoolset-${DTS} (统一软链 /opt/rh/devtoolset)"
+
+ENV CC=/opt/rh/devtoolset/root/usr/bin/gcc \
+    CXX=/opt/rh/devtoolset/root/usr/bin/g++ \
+    FC=/opt/rh/devtoolset/root/usr/bin/gfortran
+
+# ============================================================
+# 自编译 OpenSSL 1.1.1(替换系统 1.0.2)
+# CentOS 7 自带 openssl-1.0.2k,Redis 7.x BUILD_TLS=yes 需要 OpenSSL >= 1.1.0
+# (缺 SSL_set1_host 等 API,1.0.2 下编译失败)。
+# 装到 /usr/local 而非覆盖系统包:不影响 CentOS 7 自身工具(它们仍用 1.0.2)。
+# ============================================================
+RUN set -e && \
+    cd /tmp && \
+    # GitHub release tag 用下划线(OpenSSL_1_1_1w),文件名用中划线(openssl-1.1.1w.tar.gz)
+    OS_TAG=$(echo "${OPENSSL_VERSION}" | tr '.' '_' | sed 's/^/OpenSSL_/') && \
+    OS_URL="https://github.com/openssl/openssl/releases/download/${OS_TAG}/openssl-${OPENSSL_VERSION}.tar.gz" && \
+    echo "==> 下载 OpenSSL ${OPENSSL_VERSION}: $OS_URL" && \
+    curl -fsSL -o openssl.tar.gz "$OS_URL" && \
+    tar -xzf openssl.tar.gz && \
+    cd "openssl-${OPENSSL_VERSION}" && \
+    # 用 devtoolset 的 gcc 编译(ENV CC/CXX 已指向 devtoolset)
+    ./config \
+        --prefix=/usr/local/openssl-1.1 \
+        --openssldir=/usr/local/openssl-1.1 \
+        shared zlib \
+        -fPIC && \
+    make -j"$(nproc)" && \
+    make install_sw install_ssldirs && \
+    cd / && rm -rf /tmp/openssl* && \
+    # OpenSSL 1.1.1 在 CentOS 7 上装到 lib/(非 lib64),探测实际路径写 ldconfig
+    OS_LIB=$(dirname "$(find /usr/local/openssl-1.1 -name 'libssl.so.1.1' | head -1)") && \
+    echo "${OS_LIB}" > /etc/ld.so.conf.d/openssl-1.1.conf && \
+    ldconfig && \
+    # pkg-config 让 redis 的 BUILD_TLS=yes 探测到 1.1.1 的 headers/libs
+    mkdir -p /usr/local/lib/pkgconfig && \
+    ln -sf "${OS_LIB}/pkgconfig/openssl.pc" /usr/local/lib/pkgconfig/openssl.pc 2>/dev/null || true && \
+    ln -sf "${OS_LIB}/pkgconfig/libcrypto.pc" /usr/local/lib/pkgconfig/libcrypto.pc 2>/dev/null || true && \
+    ln -sf "${OS_LIB}/pkgconfig/libssl.pc" /usr/local/lib/pkgconfig/libssl.pc 2>/dev/null || true && \
+    echo "==> OpenSSL ${OPENSSL_VERSION} 安装完成 (lib: ${OS_LIB}):" && \
+    /usr/local/openssl-1.1/bin/openssl version
+
+# 全局暴露 OpenSSL 1.1.1 给编译(通过 PATH + PKG_CONFIG_PATH)
+ENV PATH="/usr/local/openssl-1.1/bin:${PATH}" \
+    PKG_CONFIG_PATH="/usr/local/lib/pkgconfig"
+
+# 打印基线信息(glibc 版本 + OpenSSL 版本 + pkg-config 探测结果)
+RUN ldd --version | head -1 && \
+    echo "OpenSSL: $(openssl version)" && \
+    echo "pkg-config openssl: $(pkg-config --modversion openssl)"

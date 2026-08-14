@@ -1,0 +1,147 @@
+name: Build Binary & Release
+
+# CI 流水线:手动触发,amd64/arm64 在各自原生 runner 上并行编译 PostgreSQL 二进制 → 发 Release。
+# 职责单一:只编译 + 发版,不做 Docker 镜像。
+#
+# 入参:
+#   pgsql_version - PostgreSQL 版本号(如 17.5)
+#
+# 编译基线固定为 glibc 2.17(CentOS 7):产物可在所有 glibc >= 2.17 的系统上运行
+# (CentOS 7/8、Rocky、Debian、Ubuntu、kylin v10、openEuler 等),无需选择档位。
+#
+# 结构(arm64 用原生 runner,不走 QEMU):
+#   compile-amd64 - ubuntu-latest(原生 amd64)
+#   compile-arm64 - ubuntu-24.04-arm(原生 arm64,免费)
+#   release       - needs 上面两个,合并两架构 tarball 发到同一 Release tag
+#
+# 注意:不使用 matrix + runs-on: ${{ matrix.runner }}。实测该写法触发 startup_failure
+# (GitHub 启动阶段无法可靠解析动态 runner label)。故拆成两个独立 job,runs-on 用静态字符串。
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      pgsql_version:
+        description: 'PostgreSQL 版本号(如 17.5)'
+        required: true
+        default: '17.5'
+        type: string
+
+jobs:
+  # ============================================================
+  # Job 1: amd64 编译(原生 amd64 runner)
+  # ============================================================
+  compile-amd64:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # 编译二进制(单架构),产物输出到 output/
+      # 基础镜像在 runner 本地构建(buildx gha 缓存加速),无需登录外部 registry
+      - name: Build Binary (amd64)
+        run: bash build/ci-build-binary.sh
+        env:
+          PGSQL_VERSION: ${{ inputs.pgsql_version }}
+          ARCH: amd64
+
+      # 上传 tarball 供 release job 下载(artifact 名带架构,避免冲突)
+      - name: Upload Binary Artifact (amd64)
+        uses: actions/upload-artifact@v4
+        with:
+          name: pgsql-binary-${{ inputs.pgsql_version }}-amd64
+          path: output/*.tar.gz
+          retention-days: 3
+          if-no-files-found: error
+
+  # ============================================================
+  # Job 2: arm64 编译(原生 arm64 runner,免费,不走 QEMU)
+  # ============================================================
+  compile-arm64:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Binary (arm64)
+        run: bash build/ci-build-binary.sh
+        env:
+          PGSQL_VERSION: ${{ inputs.pgsql_version }}
+          ARCH: arm64
+
+      - name: Upload Binary Artifact (arm64)
+        uses: actions/upload-artifact@v4
+        with:
+          name: pgsql-binary-${{ inputs.pgsql_version }}-arm64
+          path: output/*.tar.gz
+          retention-days: 3
+          if-no-files-found: error
+
+  # ============================================================
+  # Job 3: 发 Release(两架构 tarball 挂同一个 Release tag)
+  # ============================================================
+  release:
+    needs: [compile-amd64, compile-arm64]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: pgsql-binary-*
+          merge-multiple: true
+          path: release-assets/
+
+      - name: List Release Assets
+        run: |
+          echo "=== 本次 Release 产物列表 ==="
+          ls -lh release-assets/
+
+      - name: Generate Checksums
+        run: |
+          cd release-assets/
+          sha256sum *.tar.gz > postgresql-${{ inputs.pgsql_version }}.sha256sum.txt
+          cat postgresql-${{ inputs.pgsql_version }}.sha256sum.txt
+
+      - name: Create/Update Release and Upload Binaries
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ inputs.pgsql_version }}
+          name: PostgreSQL ${{ inputs.pgsql_version }}
+          body: |
+            ## PostgreSQL ${{ inputs.pgsql_version }}
+
+            便携式二进制包,自带 lib/ 运行时依赖(libssl/libcrypto,TLS 可用),
+            目标机零安装依赖,解压即用(含 contrib 扩展)。
+
+            - **编译基线**: glibc 2.17(CentOS 7)—— 可运行在所有 glibc ≥ 2.17 的系统
+              (CentOS 7/8、Rocky、Debian 9+、Ubuntu 16.04+、kylin v10、openEuler 等)
+            - **架构**: `amd64`(x86_64)/ `arm64`(aarch64)
+            - **TLS**: 已启用(OpenSSL 1.1.1,库文件在包内 lib/ 目录,RPATH 引用)
+
+            ### 安装
+            ```bash
+            tar -xzf postgresql-${{ inputs.pgsql_version }}-linux-amd64.tar.gz -C /usr/local/
+            export PATH=/usr/local/postgresql-${{ inputs.pgsql_version }}-linux-amd64/bin:$PATH
+            initdb -D /path/to/data
+            pg_ctl -D /path/to/data start
+            psql -d postgres
+            ```
+          files: |
+            release-assets/*.tar.gz
+            release-assets/*.sha256sum.txt
+          generate_release_notes: false
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+# vim: set yaml ts=2 sw=2 et:
