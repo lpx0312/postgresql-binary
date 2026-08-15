@@ -145,23 +145,26 @@ fi
 "${STAGE}/bin/psql" --version
 
 id pgtest >/dev/null 2>&1 || useradd -m pgtest
+# 数据目录由 root 预建并授权(initdb 接受已存在、属主正确、700 的空目录),
+# 避免构建容器内 /tmp 权限不确定导致 pgtest 建目录失败
 PGDATA=/tmp/pg-smoke
 rm -rf "${PGDATA}"
+install -d -o pgtest -g pgtest -m 700 "${PGDATA}"
 chown -R pgtest "${STAGE}"
 # CentOS 的 /root 默认 700,pgtest 无法穿透访问暂存目录,放开穿越权限(仅 +x,不可列目录)
 chmod o+x /root
 su pgtest -s /bin/bash -c "
     set -e
     ${STAGE}/bin/initdb -D ${PGDATA} -E UTF8 --locale=C -A trust >/dev/null
-    ${STAGE}/bin/pg_ctl -D ${PGDATA} -l /tmp/pg-smoke.log -w start
-    ${STAGE}/bin/psql -h /tmp -d postgres -c 'SELECT version();'
-    ${STAGE}/bin/psql -h /tmp -d postgres -c 'CREATE TABLE smoke(id int, val text); INSERT INTO smoke VALUES (1, '\''ok'\'');'
-    V=\$(${STAGE}/bin/psql -h /tmp -d postgres -tAc 'SELECT val FROM smoke WHERE id=1')
+    ${STAGE}/bin/pg_ctl -D ${PGDATA} -l ${PGDATA}/logfile -o \"-k '${PGDATA}'\" -w start
+    ${STAGE}/bin/psql -h ${PGDATA} -d postgres -c 'SELECT version();'
+    ${STAGE}/bin/psql -h ${PGDATA} -d postgres -c 'CREATE TABLE smoke(id int, val text); INSERT INTO smoke VALUES (1, '\''ok'\'');'
+    V=\$(${STAGE}/bin/psql -h ${PGDATA} -d postgres -tAc 'SELECT val FROM smoke WHERE id=1')
     [ \"\$V\" = '\''ok'\'' ] || { echo '❌ 冒烟测试读写失败'; exit 1; }
     ${STAGE}/bin/pg_ctl -D ${PGDATA} -m fast stop
     echo '✅ 冒烟测试通过'
 "
-rm -rf "${PGDATA}" /tmp/pg-smoke.log
+rm -rf "${PGDATA}"
 
 # ------------------------------------------------------------
 # 打 tar.gz
