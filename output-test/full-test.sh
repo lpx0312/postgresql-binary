@@ -43,7 +43,7 @@ echo "全部二进制依赖完整"
 
 echo "===== 3. initdb 初始化 + 启动 ====="
 rm -rf "$PGDATA" "$SOCKDIR"; mkdir -p "$SOCKDIR"
-bin/initdb -D "$PGDATA" -E UTF8 --locale=C -A trust
+bin/initdb -D "$PGDATA" -U postgres -E UTF8 --locale=C -A trust
 bin/pg_ctl -D "$PGDATA" -o "-p $PORT -k $SOCKDIR -c listen_addresses=''" -l "$BASE/pg1.log" -w start
 wait_up
 bin/psql -h "$SOCKDIR" -p "$PORT" -d postgres -c 'SELECT version();'
