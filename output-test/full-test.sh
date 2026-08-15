@@ -82,13 +82,19 @@ V=$(bin/psql -h "$SOCKDIR" -p "$PORT" -d testdb -tAc 'SELECT count(*) FROM t1')
 echo "pg_dump/pg_restore OK"
 
 echo "===== 7. 密码认证(scram-sha-256) ====="
-bin/psql -h "$SOCKDIR" -p "$PORT" -d postgres -qc "ALTER USER postgres PASSWORD 'test123';" 
-bin/psql -h "$SOCKDIR" -p "$PORT" -d postgres -qc \
-    "ALTER SYSTEM SET password_encryption='scram-sha-256'; SELECT pg_reload_conf();"
 bin/psql -h "$SOCKDIR" -p "$PORT" -d postgres -qc \
     "CREATE ROLE testuser LOGIN PASSWORD 'test123';"
+# 本地 socket 认证改为 scram(PG14+ 默认密码加密即 scram),reload 生效
+sed -i 's/^\(local[[:space:]]\+all[[:space:]]\+all[[:space:]]\+\)trust/\1scram-sha-256/' "$PGDATA/pg_hba.conf"
+bin/pg_ctl -D "$PGDATA" reload
 PGPASSWORD=test123 bin/psql -h "$SOCKDIR" -p "$PORT" -U testuser -d postgres -tAc 'SELECT 1;'
+if PGPASSWORD=wrongpass bin/psql -h "$SOCKDIR" -p "$PORT" -U testuser -d postgres -tAc 'SELECT 1' 2>/dev/null; then
+    echo "FAIL: 错误密码不应通过认证"; exit 1
+fi
 echo "scram-sha-256 认证 OK"
+# 恢复 trust,后续步骤(postgres 无密码)不受影响
+sed -i 's/^\(local[[:space:]]\+all[[:space:]]\+all[[:space:]]\+\)scram-sha-256/\1trust/' "$PGDATA/pg_hba.conf"
+bin/pg_ctl -D "$PGDATA" reload
 
 echo "===== 8. pgbench 压力测试 ====="
 bin/pgbench -h "$SOCKDIR" -p "$PORT" -i -q testdb
