@@ -111,11 +111,13 @@ strip "${STAGE}"/bin/* || true
 find "${STAGE}/lib" -maxdepth 1 -name '*.so' -exec strip {} \; || true
 
 # 非 glibc 的动态依赖(libssl/libcrypto/libz)打进 lib/,目标机无需安装。
-# 注意:PG 编译时默认给二进制加了指向 $prefix/lib 的绝对 RPATH,ldd 会把
-# libpq.so.5 等解析到暂存目录内 —— 已在包内的库跳过,避免 cp 自己到自己报错
+# 注意 1:PG 编译时默认给二进制加了指向 $prefix/lib 的绝对 RPATH,ldd 会把
+#   libpq.so.5 等解析到暂存目录内 —— 已在包内的库跳过,避免 cp 自己到自己报错
+# 注意 2:排除列表的库名必须带 .so 后缀锚定 —— 裸 `libc` 会前缀匹配掉
+#   libcrypto.so.1.1,导致 libcrypto 没进包,目标机上报 cannot open shared object
 for bin in "${STAGE}"/bin/*; do
     ldd "${bin}" | awk '/=> \// {print $3}'
-done | sort -u | grep -Ev '/lib(64)?/(ld-linux|libc|libm|libpthread|libdl|librt|libgcc_s|libstdc)' | \
+done | sort -u | grep -Ev '/lib(64)?/(ld-linux|libc|libm|libpthread|libdl|librt|libgcc_s|libstdc\+\+)\.so' | \
     while read -r so; do
         case "$so" in "${STAGE}"*) continue ;; esac
         echo "==> 打包运行库: ${so}"
@@ -126,6 +128,20 @@ done | sort -u | grep -Ev '/lib(64)?/(ld-linux|libc|libm|libpthread|libdl|librt|
 # bin/ 下的二进制引用 ../lib;lib/ 内的模块与 TLS 库同目录,用 $ORIGIN
 patchelf --set-rpath '$ORIGIN/../lib' "${STAGE}"/bin/*
 find "${STAGE}/lib" -maxdepth 1 -name '*.so' -exec patchelf --set-rpath '$ORIGIN' {} \;
+
+# 泄漏检查:RPATH 设置后,每个二进制的非 glibc 依赖必须解析到包内 lib/。
+# 编译容器内 ldconfig 认得 /usr/local 的 OpenSSL,缺库会被系统库掩盖,
+# 只有这条检查能在打包阶段暴露"库没进包"的问题(裸机没有 /usr/local/openssl)
+LEAK=$(for bin in "${STAGE}"/bin/*; do
+    ldd "${bin}" | awk '/=> \// {print $3}'
+done | sort -u | grep -Fv "${STAGE}/lib" | \
+    grep -Ev '/lib(64)?/(ld-linux|libc|libm|libpthread|libdl|librt|libgcc_s|libstdc\+\+)\.so' || true)
+if [ -n "${LEAK}" ]; then
+    echo "❌ 以下依赖未打进包内 lib/,目标机将缺库:"
+    echo "${LEAK}"
+    exit 1
+fi
+echo "==> 泄漏检查通过:全部非 glibc 依赖均解析到包内 lib/"
 
 # ------------------------------------------------------------
 # 兼容性自检:二进制引用的最高 GLIBC 符号版本必须 <= 2.17
