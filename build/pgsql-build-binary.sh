@@ -148,6 +148,8 @@ id pgtest >/dev/null 2>&1 || useradd -m pgtest
 PGDATA=/tmp/pg-smoke
 rm -rf "${PGDATA}"
 chown -R pgtest "${STAGE}"
+# CentOS 的 /root 默认 700,pgtest 无法穿透访问暂存目录,放开穿越权限(仅 +x,不可列目录)
+chmod o+x /root
 su pgtest -s /bin/bash -c "
     set -e
     ${STAGE}/bin/initdb -D ${PGDATA} -E UTF8 --locale=C -A trust >/dev/null
