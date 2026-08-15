@@ -179,4 +179,5 @@ echo ""
 echo "============================================"
 echo "  ✅ PostgreSQL ${PGSQL_VERSION} 编译打包完成"
 echo "============================================"
-tar tzf "${TARBALL}" | head -30
+# head 读满即关管道,tar 会收 SIGPIPE(141),pipefail 下需容忍
+tar tzf "${TARBALL}" | head -30 || true
