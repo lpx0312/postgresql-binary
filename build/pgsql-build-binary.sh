@@ -125,16 +125,20 @@ done | sort -u | grep -Ev '/lib(64)?/(ld-linux|libc|libm|libpthread|libdl|librt|
     done
 
 # RPATH 指向包内 lib/,解压即用,不依赖系统 openssl。
-# bin/ 下的二进制引用 ../lib;lib/ 内的模块与 TLS 库同目录,用 $ORIGIN
+# bin/ 下的二进制引用 ../lib;lib/ 内的模块与运行时库同目录,用 $ORIGIN。
+# lib/ 的匹配模式必须是 '*.so*' 而非 '*.so':libssl.so.1.1 / libcrypto.so.1.1 /
+# libz.so.1 这类带版本后缀的库也要设 —— 基础镜像的 OpenSSL 是 zlib 模式,
+# libcrypto 自身依赖 libz,没设 $ORIGIN 的话运行时会去系统找 zlib
 patchelf --set-rpath '$ORIGIN/../lib' "${STAGE}"/bin/*
-find "${STAGE}/lib" -maxdepth 1 -name '*.so' -exec patchelf --set-rpath '$ORIGIN' {} \;
+find "${STAGE}/lib" -maxdepth 1 -name '*.so*' -exec patchelf --set-rpath '$ORIGIN' {} \;
 
-# 泄漏检查:RPATH 设置后,每个二进制的非 glibc 依赖必须解析到包内 lib/。
-# 编译容器内 ldconfig 认得 /usr/local 的 OpenSSL,缺库会被系统库掩盖,
-# 只有这条检查能在打包阶段暴露"库没进包"的问题(裸机没有 /usr/local/openssl)
+# 泄漏检查:RPATH 设置后,每个二进制的非 glibc 依赖必须解析到包内。
+# 按 STAGE 包根目录比对 —— ldd 打印 $ORIGIN 解析结果时带 bin/../ 路径段,
+# 按 lib/ 子串比对会误报。编译容器内 ldconfig 认得 /usr/local 的 OpenSSL,
+# 缺库会被系统库掩盖,只有这条检查能在打包阶段暴露"库没进包/没设 RPATH"的问题
 LEAK=$(for bin in "${STAGE}"/bin/*; do
     ldd "${bin}" | awk '/=> \// {print $3}'
-done | sort -u | grep -Fv "${STAGE}/lib" | \
+done | sort -u | grep -Fv "${STAGE}" | \
     grep -Ev '/lib(64)?/(ld-linux|libc|libm|libpthread|libdl|librt|libgcc_s|libstdc\+\+)\.so' || true)
 if [ -n "${LEAK}" ]; then
     echo "❌ 以下依赖未打进包内 lib/,目标机将缺库:"
