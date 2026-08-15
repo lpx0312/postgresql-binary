@@ -15,7 +15,7 @@ set -euo pipefail
 #   postgresql-<ver>-linux-<arch>/
 #   ├── bin/     postgres initdb pg_ctl psql pg_dump ... (全部客户端/服务端工具)
 #   ├── lib/     libssl.so.1.1 libcrypto.so.1.1(TLS 运行时,自带,免装)
-#   ├── lib/postgresql/  内置模块(.so)
+#   │            及 *.so 内置模块(上游默认直接装 lib/,无 lib/postgresql 子目录)
 #   └── share/   时区数据、扩展 SQL、sample 等
 # ============================================================
 
@@ -107,7 +107,8 @@ make -C contrib install
 # strip 瘦身 + 收集 TLS 运行库
 # ------------------------------------------------------------
 strip "${STAGE}"/bin/* || true
-find "${STAGE}/lib/postgresql" -name '*.so' -exec strip {} \; || true
+# 上游 PG 默认把内置模块直接装 lib/(无 lib/postgresql 子目录,那是 Debian 布局)
+find "${STAGE}/lib" -maxdepth 1 -name '*.so' -exec strip {} \; || true
 
 # 非 glibc 的动态依赖(libssl/libcrypto/libz)打进 lib/,目标机无需安装。
 # 注意:PG 编译时默认给二进制加了指向 $prefix/lib 的绝对 RPATH,ldd 会把
@@ -121,9 +122,10 @@ done | sort -u | grep -Ev '/lib(64)?/(ld-linux|libc|libm|libpthread|libdl|librt|
         cp -L "${so}" "${STAGE}/lib/"
     done
 
-# RPATH 指向包内 lib/,解压即用,不依赖系统 openssl
+# RPATH 指向包内 lib/,解压即用,不依赖系统 openssl。
+# bin/ 下的二进制引用 ../lib;lib/ 内的模块与 TLS 库同目录,用 $ORIGIN
 patchelf --set-rpath '$ORIGIN/../lib' "${STAGE}"/bin/*
-find "${STAGE}/lib/postgresql" -name '*.so' -exec patchelf --set-rpath '$ORIGIN/..' {} \;
+find "${STAGE}/lib" -maxdepth 1 -name '*.so' -exec patchelf --set-rpath '$ORIGIN' {} \;
 
 # ------------------------------------------------------------
 # 兼容性自检:二进制引用的最高 GLIBC 符号版本必须 <= 2.17

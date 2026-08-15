@@ -29,7 +29,7 @@ postgresql-17.5-linux-amd64/
 ├── bin/               # postgres initdb pg_ctl psql pg_dump pg_dumpall pg_restore
 │                      # pg_basebackup pgbench createdb createuser pg_isready 等全套工具
 ├── lib/
-│   ├── postgresql/    # 内置模块 .so(contrib 扩展在 share/extension 配合)
+│   ├── *.so           # 内置模块(上游默认直接装 lib/)
 │   ├── libssl.so.1.1
 │   └── libcrypto.so.1.1
 └── share/             # 时区数据、扩展 SQL、sample 配置等
