@@ -3,7 +3,18 @@
 # 扩展加载(contrib)、备份恢复(pg_dump/pg_restore)、认证
 set -e
 BASE=/tmp/pgsql-binary-test
-PKG=$BASE/postgresql-17.5-linux-amd64
+
+# postgres 拒绝以 root 运行:root 调用时自动降权到普通用户重跑
+if [ "$(id -u)" = 0 ]; then
+    id pgtest >/dev/null 2>&1 || useradd -m -s /bin/bash pgtest
+    mkdir -p "$BASE"
+    chown -R pgtest "$BASE"
+    exec su pgtest -s /bin/bash -c "bash $0"
+fi
+
+# 自动探测解压出的包目录(postgresql-<ver>-linux-<arch>)
+PKG=$(ls -d "$BASE"/postgresql-*-linux-*/ | head -1)
+[ -n "$PKG" ] || { echo "FAIL: 未找到 $BASE/postgresql-*-linux-*/ 目录"; exit 1; }
 PGDATA=$BASE/data
 SOCKDIR=$BASE/sock
 PORT=15432
