@@ -76,10 +76,11 @@ RUN set -e && \
 #   arm64 -> devtoolset-10(GCC 10.2.1;aarch64 的 SCL 无 devtoolset-11-gcc 本体)
 # ============================================================
 # perl/perl-core:OpenSSL 1.1.1 的 ./configure 需要 Perl 5(centos:7 基础镜像不带)
-# pkgconfig:Redis 7.x 的 Makefile 用 pkg-config 探测 OpenSSL 头文件/库路径,
+# pkgconfig:Makefile/configure 用 pkg-config 探测 OpenSSL 头文件/库路径,
 #            缺了它会静默拿到空参数,编译时报 openssl/ssl.h: No such file or directory
+# bison/flex:PostgreSQL 17+ 的 configure 强制要求(即使官方 tarball 带了预生成文件)
 RUN set -e && \
-    yum install -y ca-certificates curl tar make zlib-devel perl perl-core pkgconfig && \
+    yum install -y ca-certificates curl tar make zlib-devel perl perl-core pkgconfig bison flex && \
     if [ "$TARGETARCH" = "arm64" ]; then \
         DTS=10; \
     else \
