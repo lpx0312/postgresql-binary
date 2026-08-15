@@ -98,7 +98,7 @@ bin/pg_ctl -D "$PGDATA" reload
 
 echo "===== 8. pgbench 压力测试 ====="
 bin/pgbench -h "$SOCKDIR" -p "$PORT" -i -q testdb
-bin/pgbench -h "$SOCKDIR" -p "$PORT" -c 4 -j 2 -t 100 -q testdb
+bin/pgbench -h "$SOCKDIR" -p "$PORT" -c 4 -j 2 -t 100 testdb
 echo "pgbench OK"
 
 bin/pg_ctl -D "$PGDATA" -m fast stop
