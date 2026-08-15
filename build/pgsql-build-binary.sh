@@ -46,6 +46,12 @@ if ! pkg-config --modversion openssl >/dev/null 2>&1; then
 fi
 echo "pkg-config openssl: $(pkg-config --modversion openssl)"
 
+# OpenSSL 1.1.1 装在 /usr/local/openssl-1.1(非系统默认路径),PG 的 configure
+# 探测 -lcrypto 时不会用 pkg-config 的链接参数,必须显式传头文件/库路径
+OPENSSL_PREFIX="$(pkg-config --variable=prefix openssl)"
+OPENSSL_LIBDIR="$(pkg-config --libs-only-L openssl | tr -d ' ' | sed 's/^-L//')"
+echo "OPENSSL_PREFIX=${OPENSSL_PREFIX} OPENSSL_LIBDIR=${OPENSSL_LIBDIR}"
+
 WORKDIR=/root/build
 mkdir -p "${WORKDIR}" && cd "${WORKDIR}"
 
@@ -80,6 +86,8 @@ cd "${SRC_DIR}"
 PKG_NAME="postgresql-${PGSQL_VERSION}-linux-${ARCH}"
 STAGE="/root/output/${PKG_NAME}"
 
+CPPFLAGS="-I${OPENSSL_PREFIX}/include" \
+LDFLAGS="-L${OPENSSL_LIBDIR}" \
 ./configure \
     --prefix="${STAGE}" \
     --with-openssl \
