@@ -153,17 +153,18 @@ install -d -o pgtest -g pgtest -m 700 "${PGDATA}"
 chown -R pgtest "${STAGE}"
 # CentOS 的 /root 默认 700,pgtest 无法穿透访问暂存目录,放开穿越权限(仅 +x,不可列目录)
 chmod o+x /root
-su pgtest -s /bin/bash -c "
-    set -e
-    ${STAGE}/bin/initdb -D ${PGDATA} -E UTF8 --locale=C -A trust >/dev/null
-    ${STAGE}/bin/pg_ctl -D ${PGDATA} -l ${PGDATA}/logfile -o \"-k '${PGDATA}'\" -w start
-    ${STAGE}/bin/psql -h ${PGDATA} -d postgres -c 'SELECT version();'
-    ${STAGE}/bin/psql -h ${PGDATA} -d postgres -c 'CREATE TABLE smoke(id int, val text); INSERT INTO smoke VALUES (1, '\''ok'\'');'
-    V=\$(${STAGE}/bin/psql -h ${PGDATA} -d postgres -tAc 'SELECT val FROM smoke WHERE id=1')
-    [ \"\$V\" = '\''ok'\'' ] || { echo '❌ 冒烟测试读写失败'; exit 1; }
-    ${STAGE}/bin/pg_ctl -D ${PGDATA} -m fast stop
-    echo '✅ 冒烟测试通过'
-"
+# 通过 stdin heredoc 喂给 su,避免 su -c 双引号里的嵌套引号转义地狱
+su pgtest -s /bin/bash <<EOS
+set -e
+${STAGE}/bin/initdb -D ${PGDATA} -E UTF8 --locale=C -A trust >/dev/null
+${STAGE}/bin/pg_ctl -D ${PGDATA} -l ${PGDATA}/logfile -o "-k ${PGDATA}" -w start
+${STAGE}/bin/psql -h ${PGDATA} -d postgres -c 'SELECT version();'
+${STAGE}/bin/psql -h ${PGDATA} -d postgres -c "CREATE TABLE smoke(id int, val text); INSERT INTO smoke VALUES (1, 'ok');"
+V=\$(${STAGE}/bin/psql -h ${PGDATA} -d postgres -tAc 'SELECT val FROM smoke WHERE id=1')
+[ "\$V" = "ok" ] || { echo 'smoke test rw FAILED'; exit 1; }
+${STAGE}/bin/pg_ctl -D ${PGDATA} -m fast stop
+echo 'smoke test PASSED'
+EOS
 rm -rf "${PGDATA}"
 
 # ------------------------------------------------------------
