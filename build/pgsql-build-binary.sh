@@ -109,11 +109,14 @@ make -C contrib install
 strip "${STAGE}"/bin/* || true
 find "${STAGE}/lib/postgresql" -name '*.so' -exec strip {} \; || true
 
-# 非 glibc 的动态依赖(libssl/libcrypto/libz)打进 lib/,目标机无需安装
+# 非 glibc 的动态依赖(libssl/libcrypto/libz)打进 lib/,目标机无需安装。
+# 注意:PG 编译时默认给二进制加了指向 $prefix/lib 的绝对 RPATH,ldd 会把
+# libpq.so.5 等解析到暂存目录内 —— 已在包内的库跳过,避免 cp 自己到自己报错
 for bin in "${STAGE}"/bin/*; do
     ldd "${bin}" | awk '/=> \// {print $3}'
 done | sort -u | grep -Ev '/lib(64)?/(ld-linux|libc|libm|libpthread|libdl|librt|libgcc_s|libstdc)' | \
     while read -r so; do
+        case "$so" in "${STAGE}"*) continue ;; esac
         echo "==> 打包运行库: ${so}"
         cp -L "${so}" "${STAGE}/lib/"
     done
