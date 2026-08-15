@@ -18,6 +18,8 @@ PKG=$(ls -d "$BASE"/postgresql-*-linux-*/ | head -1)
 PGDATA=$BASE/data
 SOCKDIR=$BASE/sock
 PORT=15432
+# psql/createdb/pg_dump 等客户端默认以 OS 用户名连库,统一用 postgres 超级用户
+export PGUSER=postgres
 cd "$PKG"
 
 wait_up() {
